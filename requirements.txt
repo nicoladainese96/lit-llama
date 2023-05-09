@@ -1,4 +1,4 @@
-torch>=2.0.0
+torch==2.0.1+rocm5.3
 lightning @ git+https://github.com/Lightning-AI/lightning@master
 sentencepiece
 tqdm  # convert_checkpoint.py
