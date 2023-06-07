@@ -10,8 +10,12 @@ import lightning as L
 import torch
 import tqdm
 
+# support running without installing as a package
+wd = Path(__file__).parent.parent.resolve()
+sys.path.append(str(wd))
+
 from lit_llama import LLaMA, Tokenizer
-from lit_llama.utils import EmptyInitOnDevice, llama_model_lookup
+from lit_llama.utils import EmptyInitOnDevice
 
 from datasets import load_dataset
 
@@ -45,8 +49,9 @@ def main(
     # compilation fails as it does not support torch.complex64 for RoPE
     # compile: bool = False,
     accelerator: str = "auto",
-    checkpoint_path: Path = Path("checkpoints/lit-llama/7B/lit-llama.pth"),
+    checkpoint_path: Optional[Path] = None,
     tokenizer_path: Path = Path("checkpoints/lit-llama/tokenizer.model"),
+    model_size: str = "7B",
     dtype: str = "float32",
     quantize: Optional[str] = None,
 ) -> None:
@@ -59,10 +64,13 @@ def main(
             ``"cpu"``, ``"cuda"``, ``"mps"``, ``"gpu"``, ``"tpu"``, ``"auto"``.
         checkpoint_path: The checkpoint path to load.
         tokenizer_path: The tokenizer path to load.
+        dtype: The tensor dtype for choosing the floating-point precision 
         quantize: Whether to quantize the model and using which method:
             ``"llm.int8"``: LLM.int8() mode,
             ``"gptq.int4"``: GPTQ 4-bit mode.
     """
+    if not checkpoint_path:
+        checkpoint_path = Path(f"checkpoints/lit-llama/{model_size}/lit-llama.pth")
     assert checkpoint_path.is_file()
     assert tokenizer_path.is_file()
 
@@ -78,9 +86,8 @@ def main(
     ):
         print("Loading model ...", file=sys.stderr)
         t0 = time.time()
+        model = LLaMA.from_name(model_size)
         checkpoint = torch.load(checkpoint_path)
-        name = llama_model_lookup(checkpoint)
-        model = LLaMA.from_name(name)
         model.load_state_dict(checkpoint)
         print(f"Time to load model: {time.time() - t0:.02f} seconds.", file=sys.stderr)
 
@@ -118,7 +125,6 @@ def main(
                 nlls += nll.item()
 
         print(encoded_text.shape, logits.shape)
-        encoded_text = encoded_text[:, : logits.shape[0]]
         ppl = math.exp(nlls / toks)
         print(f"Perplexity on {dsname}: {ppl:.2f}")
         total_toks += toks

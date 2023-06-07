@@ -4,12 +4,18 @@ Instruction-tuning with LoRA on the Alpaca dataset.
 Note: If you run into a CUDA error "Expected is_sm80 to be true, but got false", uncomment the line
 `torch.backends.cuda.enable_flash_sdp(False)` in the script below (see https://github.com/Lightning-AI/lit-llama/issues/101).
 """
+import sys
+from pathlib import Path
 import os
 import time
 
 import lightning as L
 import numpy as np
 import torch
+
+# support running without installing as a package
+wd = Path(__file__).parent.parent.resolve()
+sys.path.append(str(wd))
 
 from generate import generate
 from lit_llama.lora import mark_only_lora_as_trainable, lora, lora_state_dict
@@ -18,6 +24,7 @@ from lit_llama.tokenizer import Tokenizer
 from scripts.prepare_alpaca import generate_prompt
 
 
+instruction_tuning = True
 eval_interval = 100
 save_interval = 100
 eval_iters = 100
@@ -27,19 +34,21 @@ log_interval = 1
 learning_rate = 3e-4
 batch_size = 128
 micro_batch_size = 4
-gradient_accumulation_steps = batch_size // micro_batch_size
+gradient_accumulation_iters = batch_size // micro_batch_size
+assert gradient_accumulation_iters > 0
 max_iters = 50000 * 3 // micro_batch_size
 weight_decay = 0.0
 max_seq_length = 256  # see scripts/prepare_alpaca.py
 lora_r = 8
 lora_alpha = 16
 lora_dropout = 0.05
-warmup_steps = 100
+warmup_iters = 100
 
 
 def main(
     data_dir: str = "data/alpaca", 
     pretrained_path: str = "checkpoints/lit-llama/7B/lit-llama.pth",
+    tokenizer_path: str = "checkpoints/lit-llama/tokenizer.model",
     out_dir: str = "out/lora/alpaca",
 ):
 
@@ -66,7 +75,7 @@ def main(
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
     model, optimizer = fabric.setup(model, optimizer)
-    train(fabric, model, optimizer, train_data, val_data, out_dir)
+    train(fabric, model, optimizer, train_data, val_data, tokenizer_path, out_dir)
 
     # Save the final LoRA checkpoint at the end of training
     checkpoint = lora_state_dict(model)
@@ -79,6 +88,7 @@ def train(
     optimizer: torch.optim.Optimizer,
     train_data: np.ndarray,
     val_data: np.ndarray,
+    tokenizer_path: str,
     out_dir: str,
 ) -> None:
     """The training loop.
@@ -89,26 +99,27 @@ def train(
 
     for iter_num in range(max_iters):
 
-        if step_count <= warmup_steps:
+        if step_count <= warmup_iters:
             # linear warmup
-            lr = learning_rate * step_count / warmup_steps
+            lr = learning_rate * step_count / warmup_iters
             for param_group in optimizer.param_groups:
                 param_group['lr'] = lr
 
         t0 = time.time()
 
         input_ids, targets = get_batch(fabric, train_data)
-        logits = model(input_ids)
-        loss = loss_fn(logits, targets)
-        fabric.backward(loss)
+        with fabric.no_backward_sync(model, enabled=((iter_num + 1) % gradient_accumulation_iters != 0)):
+            logits = model(input_ids)
+            loss = loss_fn(logits, targets)
+            fabric.backward(loss / gradient_accumulation_iters)
 
-        if (iter_num + 1) % gradient_accumulation_steps == 0:
+        if (iter_num + 1) % gradient_accumulation_iters == 0:
             optimizer.step()
             optimizer.zero_grad()
             step_count += 1
                 
             if step_count % eval_interval == 0:
-                val_loss = validate(fabric, model, val_data)
+                val_loss = validate(fabric, model, val_data, tokenizer_path)
                 fabric.print(f"step {iter_num}: val loss {val_loss:.4f}")
                 fabric.barrier()
 
@@ -124,10 +135,12 @@ def train(
             fabric.print(f"iter {iter_num}: loss {loss.item():.4f}, time: {dt*1000:.2f}ms")
 
 
-def generate_response(model, instruction):
-    tokenizer = Tokenizer("checkpoints/lit-llama/tokenizer.model")
+def generate_response(model, instruction, tokenizer_path):
+    tokenizer = Tokenizer(tokenizer_path)
     sample = {"instruction": instruction, "input": ""}
-    prompt = generate_prompt(sample)
+    prompt = instruction
+    if instruction_tuning:
+        prompt = generate_prompt(sample)
     encoded = tokenizer.encode(prompt, bos=True, eos=False, device=model.device)
 
     output = generate(
@@ -141,7 +154,7 @@ def generate_response(model, instruction):
 
 
 @torch.no_grad()
-def validate(fabric: L.Fabric, model: torch.nn.Module, val_data: np.ndarray) -> torch.Tensor:
+def validate(fabric: L.Fabric, model: torch.nn.Module, val_data: np.ndarray, tokenizer_path: str) -> torch.Tensor:
     fabric.print("Validating ...")
     model.eval()
     losses = torch.zeros(eval_iters)
@@ -155,7 +168,7 @@ def validate(fabric: L.Fabric, model: torch.nn.Module, val_data: np.ndarray) -> 
     # produce an example:
     instruction = "Recommend a movie for me to watch during the weekend and explain the reason."
     
-    output = generate_response(model, instruction)
+    output = generate_response(model, instruction, tokenizer_path)
     fabric.print(instruction)
     fabric.print(output)
 

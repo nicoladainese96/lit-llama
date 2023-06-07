@@ -10,6 +10,10 @@ import lightning as L
 import torch
 import tqdm
 
+# support running without installing as a package
+wd = Path(__file__).parent.parent.resolve()
+sys.path.append(str(wd))
+
 from lit_llama import LLaMA, Tokenizer
 from lit_llama.utils import EmptyInitOnDevice, lazy_load, llama_model_lookup
 from lit_llama.lora import lora
@@ -17,6 +21,7 @@ from scripts.prepare_alpaca import generate_prompt
 
 from datasets import load_dataset
 
+instruction_tuning = True
 lora_r = 8
 lora_alpha = 16
 lora_dropout = 0.05
@@ -69,6 +74,7 @@ def main(
             `finetune_lora.py`.
         checkpoint_path: The checkpoint path to load.
         tokenizer_path: The tokenizer path to load.
+        dtype: The tensor dtype for choosing the floating-point precision 
         quantize: Whether to quantize the model and using which method:
             ``"llm.int8"``: LLM.int8() mode,
             ``"gptq.int4"``: GPTQ 4-bit mode.
@@ -90,19 +96,18 @@ def main(
     print("Loading model ...", file=sys.stderr)
     t0 = time.time()
 
-    pretrained_checkpoint = lazy_load(checkpoint_path)
-    adapter_checkpoint = lazy_load(lora_path)
-    name = llama_model_lookup(pretrained_checkpoint)
+    with lazy_load(checkpoint_path) as pretrained_checkpoint, lazy_load(lora_path) as lora_checkpoint:
+        name = llama_model_lookup(pretrained_checkpoint)
 
-    with EmptyInitOnDevice(
-        device=fabric.device, dtype=dtype, quantization_mode=quantize
-    ), lora(r=lora_r, alpha=lora_alpha, dropout=lora_dropout, enabled=True):
-        model = LLaMA.from_name(name)
+        with EmptyInitOnDevice(
+                device=fabric.device, dtype=dtype, quantization_mode=quantize
+        ), lora(r=lora_r, alpha=lora_alpha, dropout=lora_dropout, enabled=True):
+            model = LLaMA.from_name(name)
 
-    # 1. Load the pretrained weights
-    model.load_state_dict(pretrained_checkpoint, strict=False)
-    # 2. Load the fine-tuned adapter weights
-    model.load_state_dict(adapter_checkpoint, strict=False)
+            # 1. Load the pretrained weights
+            model.load_state_dict(pretrained_checkpoint, strict=False)
+            # 2. Load the fine-tuned lora weights
+            model.load_state_dict(lora_checkpoint, strict=False)
 
     print(f"Time to load model: {time.time() - t0:.02f} seconds.", file=sys.stderr)
 
@@ -119,8 +124,9 @@ def main(
     for dsname in datasets.split(","):
         test_string = load_eval_data(dsname)
 
-        sample = {"instruction": test_string, "input": input}
-        test_string = generate_prompt(sample)
+        if instruction_tuning:
+            sample = {"instruction": test_string, "input": input}
+            test_string = generate_prompt(sample)
         
         encoded_text = tokenizer.encode(
             test_string, bos=True, eos=False, device=fabric.device
@@ -144,7 +150,6 @@ def main(
                 nlls += nll.item()
 
         print(encoded_text.shape, logits.shape)
-        encoded_text = encoded_text[:, : logits.shape[0]]
         ppl = math.exp(nlls / toks)
         print(f"Perplexity on {dsname}: {ppl:.2f}")
         total_toks += toks

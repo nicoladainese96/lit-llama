@@ -7,7 +7,7 @@ We demonstrate this method by instruction-finetuning LLaMA 7B on the [Alpaca](ht
 
 The steps here only need to be done once:
 
-1. Follow the instructions in the [README](README.md) to install the dependencies.
+1. Follow the instructions in the [README](../README.md) to install the dependencies.
 2. Download and convert the weights and save them in the `./checkpoints` folder as described [here](download_weights.md).
 3. Download the data and generate the instruction tuning dataset:
 
@@ -15,10 +15,12 @@ The steps here only need to be done once:
    python scripts/prepare_alpaca.py
    ```
 
+See also: [Finetuning on an unstructured dataset](unstructured_dataset.md)
+
 ## Running the finetuning
 
 ```bash
-python finetune_lora.py
+python finetune/lora.py
 ```
 
 The finetuning requires at least one GPU with ~24 GB memory (GTX 3090).
@@ -34,7 +36,7 @@ This script will save checkpoints periodically to the folder `out/`.
 You can test the finetuned model with your own instructions by running:
 
 ```bash
-python generate_lora.py --prompt "Recommend a movie to watch on the weekend."
+python generate/lora.py --prompt "Recommend a movie to watch on the weekend."
 ```
 Output:
 ```
@@ -75,10 +77,10 @@ With only a few modifications, you can prepare and train on your own instruction
     python scripts/prepare_mydata.py --destination_path data/mydata/
     ```
 
-5. Run `finetune_lora.py` by passing in the location of your data (and optionally other parameters):
+5. Run `finetune/lora.py` by passing in the location of your data (and optionally other parameters):
     
     ```bash
-    python finetune_lora.py --data_dir data/mydata/ --out_dir out/myexperiment
+    python finetune/lora.py --data_dir data/mydata/ --out_dir out/myexperiment
     ```
 
 

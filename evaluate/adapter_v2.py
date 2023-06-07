@@ -10,9 +10,14 @@ import lightning as L
 import torch
 import tqdm
 
+# support running without installing as a package
+wd = Path(__file__).parent.parent.resolve()
+sys.path.append(str(wd))
+
 from lit_llama import Tokenizer
 from lit_llama.adapter import LLaMA
 from lit_llama.utils import EmptyInitOnDevice, lazy_load, llama_model_lookup
+from lit_llama.adapter_v2 import add_adapter_v2_parameters_to_linear_layers
 from scripts.prepare_alpaca import generate_prompt
 
 from datasets import load_dataset
@@ -41,13 +46,12 @@ def load_eval_data(dataset_name: str) -> str:
     return testdata
 
 
+@torch.inference_mode()
 def main(
     datasets: str = "wikitext,ptb,c4",
     *,
-    # compilation fails as it does not support torch.complex64 for RoPE
-    # compile: bool = False,
     accelerator: str = "auto",
-    adapter_path: Path = Path("out/adapter/alpaca/lit-llama-adapter-finetuned.pth"),
+    adapter_path: Path = Path("out/adapter_v2/alpaca/lit-llama-adapter-finetuned.pth"),
     checkpoint_path: Path = Path("checkpoints/lit-llama/7B/lit-llama.pth"),
     tokenizer_path: Path = Path("checkpoints/lit-llama/tokenizer.model"),
     dtype: str = "float32",
@@ -57,13 +61,13 @@ def main(
 
     Args:
         datasets: The datasets to use as a comma separated string
-        # compile: Whether to compile the model.
         accelerator: The hardware to run on. Possible choices are:
             ``"cpu"``, ``"cuda"``, ``"mps"``, ``"gpu"``, ``"tpu"``, ``"auto"``.
         adapter_path: Path to the checkpoint with trained adapter weights, which are the output of
-            `finetune_adapter.py`.
+            `finetune_adapter_v2.py`.
         checkpoint_path: The checkpoint path to load.
         tokenizer_path: The tokenizer path to load.
+        dtype: The tensor dtype for choosing the floating-point precision 
         quantize: Whether to quantize the model and using which method:
             ``"llm.int8"``: LLM.int8() mode,
             ``"gptq.int4"``: GPTQ 4-bit mode.
@@ -79,22 +83,23 @@ def main(
         raise ValueError(f"{dtype} is not a valid dtype.")
     dtype = dt
 
-    with EmptyInitOnDevice(
-        device=fabric.device, dtype=dtype, quantization_mode=quantize
-    ):
-        print("Loading model ...", file=sys.stderr)
-        t0 = time.time()
-        pretrained_checkpoint = lazy_load(checkpoint_path)
-        adapter_checkpoint = lazy_load(adapter_path)
+    print("Loading model ...", file=sys.stderr)
+    t0 = time.time()
+    with lazy_load(checkpoint_path) as pretrained_checkpoint, lazy_load(adapter_path) as adapter_checkpoint:
         name = llama_model_lookup(pretrained_checkpoint)
-        model = LLaMA.from_name(name)
+
+        with EmptyInitOnDevice(
+            device=fabric.device, dtype=dtype, quantization_mode=quantize
+        ):
+            model = LLaMA.from_name(name)
+            add_adapter_v2_parameters_to_linear_layers(model)
 
         # 1. Load the pretrained weights
         model.load_state_dict(pretrained_checkpoint, strict=False)
         # 2. Load the fine-tuned adapter weights
         model.load_state_dict(adapter_checkpoint, strict=False)
 
-        print(f"Time to load model: {time.time() - t0:.02f} seconds.", file=sys.stderr)
+    print(f"Time to load model: {time.time() - t0:.02f} seconds.", file=sys.stderr)
 
     model.eval()
 
@@ -122,19 +127,18 @@ def main(
 
         nlls = 0
         toks = 0
-        with torch.inference_mode():
-            block_size = 2048  # this is for compat with gptq, and indeed we get much worse beyond this (https://github.com/facebookresearch/llama/blob/57b0eb62de0636e75af471e49e2f1862d908d9d8/llama/model.py#L30)
-            for i in tqdm.tqdm(range(0, encoded_text.shape[1], block_size)):
-                inp = encoded_text[:, i : i + block_size]
-                logits = model(inp)[0]
-                nll = torch.nn.functional.cross_entropy(
-                    logits[:-1], inp[0, 1:].to(dtype=torch.long), reduction="sum"
-                )
-                toks += inp.size(1) - 1
-                nlls += nll.item()
+
+        block_size = 2048  # this is for compat with gptq, and indeed we get much worse beyond this (https://github.com/facebookresearch/llama/blob/57b0eb62de0636e75af471e49e2f1862d908d9d8/llama/model.py#L30)
+        for i in tqdm.tqdm(range(0, encoded_text.shape[1], block_size)):
+            inp = encoded_text[:, i : i + block_size]
+            logits = model(inp)[0]
+            nll = torch.nn.functional.cross_entropy(
+                logits[:-1], inp[0, 1:].to(dtype=torch.long), reduction="sum"
+            )
+            toks += inp.size(1) - 1
+            nlls += nll.item()
 
         print(encoded_text.shape, logits.shape)
-        encoded_text = encoded_text[:, : logits.shape[0]]
         ppl = math.exp(nlls / toks)
         print(f"Perplexity on {dsname}: {ppl:.2f}")
         total_toks += toks
