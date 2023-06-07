@@ -3,6 +3,8 @@ __pycache__
 .DS_Store
 *.egg-info
 build
+llama_venv
+slurm
 
 # data
 data
