@@ -12,6 +12,7 @@ import time
 import lightning as L
 import numpy as np
 import torch
+import argparse
 
 # support running without installing as a package
 wd = Path(__file__).parent.parent.resolve()
@@ -23,35 +24,29 @@ from lit_llama.model import LLaMA, LLaMAConfig
 from lit_llama.tokenizer import Tokenizer
 from scripts.prepare_alpaca import generate_prompt
 
-
-instruction_tuning = True
-eval_interval = 100
-save_interval = 100
-eval_iters = 100
-log_interval = 1
-
-# Hyperparameters
-learning_rate = 3e-4
-batch_size = 128
-micro_batch_size = 4
-gradient_accumulation_iters = batch_size // micro_batch_size
-assert gradient_accumulation_iters > 0
-max_iters = 50000 * 3 // micro_batch_size
-weight_decay = 0.0
-max_seq_length = 256  # see scripts/prepare_alpaca.py
-lora_r = 8
-lora_alpha = 16
-lora_dropout = 0.05
-warmup_iters = 100
-
-
 def main(
-    data_dir: str = "data/alpaca", 
-    pretrained_path: str = "checkpoints/lit-llama/7B/lit-llama.pth",
-    tokenizer_path: str = "checkpoints/lit-llama/tokenizer.model",
-    out_dir: str = "out/lora/alpaca",
+    data_dir, 
+    pretrained_path, 
+    tokenizer_path, 
+    out_dir,
+    instruction_tuning, 
+    eval_interval, 
+    save_interval, 
+    eval_iters,
+    log_interval, 
+    learning_rate, 
+    batch_size, 
+    micro_batch_size,
+    weight_decay, 
+    max_seq_length, 
+    lora_r, 
+    lora_alpha,
+    lora_dropout, 
+    warmup_iters
 ):
 
+    assert gradient_accumulation_iters > 0
+    
     fabric = L.Fabric(accelerator="cuda", devices=1, precision="bf16-true")
     fabric.launch()
     fabric.seed_everything(1337 + fabric.global_rank)
@@ -213,6 +208,46 @@ if __name__ == "__main__":
     # torch.backends.cuda.enable_flash_sdp(False)
     torch.set_float32_matmul_precision("high")
     
-    from jsonargparse.cli import CLI
+    if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
 
-    CLI(main)
+    # Define command-line arguments
+    parser.add_argument("--data_dir", type=str, default="data/alpaca")
+    parser.add_argument("--pretrained_path", type=str, default="checkpoints/lit-llama/7B/lit-llama.pth")
+    parser.add_argument("--tokenizer_path", type=str, default="checkpoints/lit-llama/tokenizer.model")
+    parser.add_argument("--out_dir", type=str, default="out/lora/alpaca")
+
+    # Additional arguments
+    parser.add_argument("--instruction_tuning", type=bool, default=True)
+    parser.add_argument("--eval_interval", type=int, default=100)
+    parser.add_argument("--save_interval", type=int, default=100)
+    parser.add_argument("--eval_iters", type=int, default=100)
+    parser.add_argument("--log_interval", type=int, default=1)
+    parser.add_argument("--learning_rate", type=float, default=3e-4)
+    parser.add_argument("--batch_size", type=int, default=128)
+    parser.add_argument("--micro_batch_size", type=int, default=4)
+    parser.add_argument("--weight_decay", type=float, default=0.0)
+    parser.add_argument("--max_seq_length", type=int, default=256)
+    parser.add_argument("--lora_r", type=int, default=8)
+    parser.add_argument("--lora_alpha", type=int, default=16)
+    parser.add_argument("--lora_dropout", type=float, default=0.05)
+    parser.add_argument("--warmup_iters", type=int, default=100)
+    
+    parser.add_argument("--config_file", type=str, default=None)
+    
+    # Load command-line arguments from a file if specified
+    if args.config_file:
+        with open(args.config_file, "r") as file:
+            config = json.load(file)
+            parser.set_defaults(**config)
+    
+    args = parser.parse_args()
+
+    # Call the main function with the command-line arguments
+    main(
+        args.data_dir, args.pretrained_path, args.tokenizer_path, args.out_dir,
+        args.instruction_tuning, args.eval_interval, args.save_interval, args.eval_iters,
+        args.log_interval, args.learning_rate, args.batch_size, args.micro_batch_size,
+        args.weight_decay, args.max_seq_length, args.lora_r, args.lora_alpha,
+        args.lora_dropout, args.warmup_iters
+    )
