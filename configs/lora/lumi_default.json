@@ -1,7 +1,7 @@
 {
   "data_dir": "data/alpaca",
-  "pretrained_path": "checkpoints/lit-llama/7B/lit-llama.pth",
-  "tokenizer_path": "checkpoints/lit-llama/tokenizer.model",
+  "pretrained_path": "/pfs/lustref1/flash/project_462000219/llm_models/lit_llama/checkpoints/lit-llama/7B/lit-llama.pth",
+  "tokenizer_path": "/pfs/lustref1/flash/project_462000219/ll_models/lit_llama/checkpoints/lit-llama/tokenizer.model",
   "finetuned_name":"lit-llama-lora-finetuned.pth",
   "out_dir": "out/lora/alpaca",
   "instruction_tuning": true,

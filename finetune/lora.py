@@ -28,6 +28,7 @@ def main(
     data_dir, 
     pretrained_path, 
     tokenizer_path, 
+    finetuned_name,
     out_dir,
     instruction_tuning, 
     eval_interval, 
@@ -46,8 +47,10 @@ def main(
 ):
 
     assert gradient_accumulation_iters > 0
+    num_devices = torch.cuda.device_count()
+    print(f"Number of available CUDA devices: {num_devices}")
     
-    fabric = L.Fabric(accelerator="cuda", devices=1, precision="bf16-true")
+    fabric = L.Fabric(accelerator="cuda", devices=num_devices, precision="bf16-true")
     fabric.launch()
     fabric.seed_everything(1337 + fabric.global_rank)
 
@@ -56,7 +59,7 @@ def main(
 
     train_data, val_data = load_datasets(data_dir=data_dir)
 
-    config = LLaMAConfig.from_name("7B")
+    config = LLaMAConfig.from_name("7B") # HARDCODED
     config.block_size = max_seq_length
 
     checkpoint = torch.load(pretrained_path)
@@ -74,7 +77,7 @@ def main(
 
     # Save the final LoRA checkpoint at the end of training
     checkpoint = lora_state_dict(model)
-    fabric.save(os.path.join(out_dir, "lit-llama-lora-finetuned.pth"), checkpoint)
+    fabric.save(os.path.join(out_dir, finetuned_name), checkpoint)
 
 
 def train(
@@ -215,6 +218,7 @@ if __name__ == "__main__":
     parser.add_argument("--data_dir", type=str, default="data/alpaca")
     parser.add_argument("--pretrained_path", type=str, default="checkpoints/lit-llama/7B/lit-llama.pth")
     parser.add_argument("--tokenizer_path", type=str, default="checkpoints/lit-llama/tokenizer.model")
+    parser.add_argument("--finetuned_name", type=str, default="lit-llama-lora-finetuned.pth")
     parser.add_argument("--out_dir", type=str, default="out/lora/alpaca")
 
     # Additional arguments
