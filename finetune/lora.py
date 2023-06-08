@@ -13,6 +13,7 @@ import lightning as L
 import numpy as np
 import torch
 import argparse
+import json
 
 # support running without installing as a package
 wd = Path(__file__).parent.parent.resolve()
@@ -24,28 +25,12 @@ from lit_llama.model import LLaMA, LLaMAConfig
 from lit_llama.tokenizer import Tokenizer
 from scripts.prepare_alpaca import generate_prompt
 
-def main(
-    data_dir, 
-    pretrained_path, 
-    tokenizer_path, 
-    finetuned_name,
-    out_dir,
-    instruction_tuning, 
-    eval_interval, 
-    save_interval, 
-    eval_iters,
-    log_interval, 
-    learning_rate, 
-    batch_size, 
-    micro_batch_size,
-    weight_decay, 
-    max_seq_length, 
-    lora_r, 
-    lora_alpha,
-    lora_dropout, 
-    warmup_iters
-):
-
+def main(args):
+    print("pretrained_path",args.pretrained_path)
+    print("tokenizer_path", args.tokenizer_path)
+    print("finetuned_name", args.finetuned_name)
+    print("out_dir",args.out_dir)
+    gradient_accumulation_iters = args.batch_size // args.micro_batch_size
     assert gradient_accumulation_iters > 0
     num_devices = torch.cuda.device_count()
     print(f"Number of available CUDA devices: {num_devices}")
@@ -55,29 +40,29 @@ def main(
     fabric.seed_everything(1337 + fabric.global_rank)
 
     if fabric.global_rank == 0:
-        os.makedirs(out_dir, exist_ok=True)
+        os.makedirs(args.out_dir, exist_ok=True)
 
-    train_data, val_data = load_datasets(data_dir=data_dir)
+    train_data, val_data = load_datasets(data_dir=args.data_dir)
 
-    config = LLaMAConfig.from_name("7B") # HARDCODED
-    config.block_size = max_seq_length
+    config = LLaMAConfig.from_name("7B") # HARDCODEDi
+    config.block_size = args.max_seq_length
 
-    checkpoint = torch.load(pretrained_path)
+    checkpoint = torch.load(args.pretrained_path)
 
-    with fabric.init_module(), lora(r=lora_r, alpha=lora_alpha, dropout=lora_dropout, enabled=True):
+    with fabric.init_module(), lora(r=args.lora_r, alpha=args.lora_alpha, dropout=args.lora_dropout, enabled=True):
         model = LLaMA(config)
         # strict=False because missing keys due to LoRA weights not contained in checkpoint state
         model.load_state_dict(checkpoint, strict=False)
     
     mark_only_lora_as_trainable(model)
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate)
     model, optimizer = fabric.setup(model, optimizer)
-    train(fabric, model, optimizer, train_data, val_data, tokenizer_path, out_dir)
+    train(fabric, model, optimizer, train_data, val_data, args.tokenizer_path, args.out_dir, args, gradient_accumulation_iters)
 
     # Save the final LoRA checkpoint at the end of training
     checkpoint = lora_state_dict(model)
-    fabric.save(os.path.join(out_dir, finetuned_name), checkpoint)
+    fabric.save(os.path.join(args.out_dir, args.finetuned_name), checkpoint)
 
 
 def train(
@@ -88,6 +73,8 @@ def train(
     val_data: np.ndarray,
     tokenizer_path: str,
     out_dir: str,
+    args,
+    gradient_accumulation_iters
 ) -> None:
     """The training loop.
 
@@ -95,17 +82,17 @@ def train(
     """
     step_count = 0
 
-    for iter_num in range(max_iters):
+    for iter_num in range(args.max_iters):
 
-        if step_count <= warmup_iters:
+        if step_count <= args.warmup_iters:
             # linear warmup
-            lr = learning_rate * step_count / warmup_iters
+            lr = args.learning_rate * step_count / args.warmup_iters
             for param_group in optimizer.param_groups:
                 param_group['lr'] = lr
 
         t0 = time.time()
 
-        input_ids, targets = get_batch(fabric, train_data)
+        input_ids, targets = get_batch(fabric, train_data, args)
         with fabric.no_backward_sync(model, enabled=((iter_num + 1) % gradient_accumulation_iters != 0)):
             logits = model(input_ids)
             loss = loss_fn(logits, targets)
@@ -116,12 +103,12 @@ def train(
             optimizer.zero_grad()
             step_count += 1
                 
-            if step_count % eval_interval == 0:
-                val_loss = validate(fabric, model, val_data, tokenizer_path)
+            if step_count % args.eval_interval == 0:
+                val_loss = validate(fabric, model, val_data, tokenizer_path, args)
                 fabric.print(f"step {iter_num}: val loss {val_loss:.4f}")
                 fabric.barrier()
 
-            if step_count % save_interval == 0:
+            if step_count % args.save_interval == 0:
                 print(f"Saving LoRA weights to {out_dir}")
                 # We are only saving the LoRA weights
                 # TODO: Provide a function/script to merge the LoRA weights with pretrained weights
@@ -129,11 +116,11 @@ def train(
                 fabric.save(os.path.join(out_dir, f"iter-{iter_num:06d}-ckpt.pth"), checkpoint)
 
         dt = time.time() - t0
-        if iter_num % log_interval == 0:
+        if iter_num % args.log_interval == 0:
             fabric.print(f"iter {iter_num}: loss {loss.item():.4f}, time: {dt*1000:.2f}ms")
 
 
-def generate_response(model, instruction, tokenizer_path):
+def generate_response(model, instruction, tokenizer_path, args):
     tokenizer = Tokenizer(tokenizer_path)
     sample = {"instruction": instruction, "input": ""}
     prompt = instruction
@@ -144,7 +131,7 @@ def generate_response(model, instruction, tokenizer_path):
     output = generate(
         model,
         idx=encoded,
-        max_seq_length=max_seq_length,
+        max_seq_length=args.max_seq_length,
         max_new_tokens=100,
     )
     output = tokenizer.decode(output)
@@ -152,12 +139,12 @@ def generate_response(model, instruction, tokenizer_path):
 
 
 @torch.no_grad()
-def validate(fabric: L.Fabric, model: torch.nn.Module, val_data: np.ndarray, tokenizer_path: str) -> torch.Tensor:
+def validate(fabric: L.Fabric, model: torch.nn.Module, val_data: np.ndarray, tokenizer_path: str, args) -> torch.Tensor:
     fabric.print("Validating ...")
     model.eval()
-    losses = torch.zeros(eval_iters)
-    for k in range(eval_iters):
-        input_ids, targets = get_batch(fabric, val_data)
+    losses = torch.zeros(args.eval_iters)
+    for k in range(args.eval_iters):
+        input_ids, targets = get_batch(fabric, val_data, args)
         logits = model(input_ids)
         loss = loss_fn(logits, targets)
         losses[k] = loss.item()
@@ -166,7 +153,7 @@ def validate(fabric: L.Fabric, model: torch.nn.Module, val_data: np.ndarray, tok
     # produce an example:
     instruction = "Recommend a movie for me to watch during the weekend and explain the reason."
     
-    output = generate_response(model, instruction, tokenizer_path)
+    output = generate_response(model, instruction, args.tokenizer_path, args)
     fabric.print(instruction)
     fabric.print(output)
 
@@ -181,8 +168,8 @@ def loss_fn(logits, targets):
     return loss
     
 
-def get_batch(fabric: L.Fabric, data: list):
-    ix = torch.randint(len(data), (micro_batch_size,))
+def get_batch(fabric: L.Fabric, data: list, args):
+    ix = torch.randint(len(data), (args.micro_batch_size,))
 
     input_ids = [data[i]["input_ids"].type(torch.int64) for i in ix]
     labels = [data[i]["labels"].type(torch.int64) for i in ix]
@@ -211,7 +198,6 @@ if __name__ == "__main__":
     # torch.backends.cuda.enable_flash_sdp(False)
     torch.set_float32_matmul_precision("high")
     
-    if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
     # Define command-line arguments
@@ -225,6 +211,7 @@ if __name__ == "__main__":
     parser.add_argument("--instruction_tuning", type=bool, default=True)
     parser.add_argument("--eval_interval", type=int, default=100)
     parser.add_argument("--save_interval", type=int, default=100)
+    parser.add_argument("--max_iters", type=int, default=50000)
     parser.add_argument("--eval_iters", type=int, default=100)
     parser.add_argument("--log_interval", type=int, default=1)
     parser.add_argument("--learning_rate", type=float, default=3e-4)
@@ -238,20 +225,19 @@ if __name__ == "__main__":
     parser.add_argument("--warmup_iters", type=int, default=100)
     
     parser.add_argument("--config_file", type=str, default=None)
-    
+   
+    args = parser.parse_args()
+
     # Load command-line arguments from a file if specified
     if args.config_file:
         with open(args.config_file, "r") as file:
             config = json.load(file)
-            parser.set_defaults(**config)
+            #parser.set_defaults(**config)
+            
+            # Assign values from the config to args only if the arguments exist
+            for arg_name, arg_value in config.items():
+                if hasattr(args, arg_name):
+                    setattr(args, arg_name, arg_value)
     
-    args = parser.parse_args()
-
     # Call the main function with the command-line arguments
-    main(
-        args.data_dir, args.pretrained_path, args.tokenizer_path, args.out_dir,
-        args.instruction_tuning, args.eval_interval, args.save_interval, args.eval_iters,
-        args.log_interval, args.learning_rate, args.batch_size, args.micro_batch_size,
-        args.weight_decay, args.max_seq_length, args.lora_r, args.lora_alpha,
-        args.lora_dropout, args.warmup_iters
-    )
+    main(args)
