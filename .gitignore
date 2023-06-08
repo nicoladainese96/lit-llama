@@ -5,6 +5,7 @@ __pycache__
 build
 llama_venv
 slurm
+*ipynb_checkpoints
 
 # data
 data
